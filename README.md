@@ -15,6 +15,7 @@
     * 点击 **Save and Deploy**。
 ---
 # 激活 Webhook 
+部署后访问：
 `https://api.telegram.org/bot<你的BOT_TOKEN>/setWebhook?url=https://<你的Worker域名>/`
 
 代码修改自
