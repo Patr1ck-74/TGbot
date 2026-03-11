@@ -1,4 +1,4 @@
-// Cloudflare Worker：Telegram 双向机器人 (带首次验证防广告)
+// Cloudflare Worker：Telegram 双向机器人
 
 export default {
   async fetch(request, env, ctx) {
@@ -15,7 +15,7 @@ export default {
       return new Response("OK");
     }
 
-    // 1. 优先处理验证按钮点击
+    // 1. 优先处理验证按钮点击 (支持随机ID前缀匹配)
     if (update.callback_query) {
       try {
         await handleCallback(update.callback_query, env);
@@ -30,7 +30,7 @@ export default {
 
     ctx.waitUntil(flushExpiredMediaGroups(env, Date.now()));
 
-    // 2. 处理私聊 (包含验证逻辑)
+    // 2. 处理私聊
     if (msg.chat && msg.chat.type === "private") {
       try {
         await handlePrivateMessage(msg, env, ctx);
@@ -66,14 +66,15 @@ async function handleCallback(query, env) {
   const userId = query.from.id;
   const data = query.data;
 
-  if (data === "verify_user") {
+  // 修改：改为匹配随机ID前缀
+  if (data.startsWith("verify:")) {
     // 在 KV 中标记已验证
-    await env.TOPIC_MAP.put(`verified:${userId}`, "true");
+    await env.TOPIC_MAP.put(`verified:${userId}`, "true", { expirationTtl: 2592000 });
     
     // 消除按钮转圈并弹出提示
     await tgCall(env, "answerCallbackQuery", { 
       callback_query_id: query.id, 
-      text: "✅ 验证成功！请重新发送您的消息。",
+      text: "✅ 验证成功！",
       show_alert: true 
     });
 
@@ -90,31 +91,51 @@ async function handleCallback(query, env) {
 async function handlePrivateMessage(msg, env, ctx) {
   const userId = msg.chat.id;
   const key = `user:${userId}`;
-  if (msg.text && msg.text.startsWith("/")) return;
+  const text = (msg.text || "").trim();
 
   const isBanned = await env.TOPIC_MAP.get(`banned:${userId}`);
   if (isBanned) return;
 
-  // --- 拦截未验证用户 ---
   const isVerified = await env.TOPIC_MAP.get(`verified:${userId}`);
+
+  // 修改：/start 立即触发验证
+  if (text === "/start") {
+    if (isVerified) {
+      await tgCall(env, "sendMessage", { chat_id: userId, text: "您已经通过验证，可以直接发送消息。" });
+    } else {
+      const verifyId = Math.random().toString(36).substring(2, 10);
+      await tgCall(env, "sendMessage", {
+        chat_id: userId,
+        text: "🛡️ **为了防止广告骚扰，请点击下方按钮完成验证。**\n验证通过后即可开始对话。",
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [[
+            { text: "我不是机器人 [点击验证]", callback_data: `verify:${verifyId}` }
+          ]]
+        }
+      });
+    }
+    return;
+  }
+
+  // 修改：拦截未验证用户的普通消息
   if (!isVerified) {
     await tgCall(env, "sendMessage", {
       chat_id: userId,
-      text: "🛡️ **为了防止广告骚扰，请点击下方按钮完成验证。**\n验证后您的第一条消息需要重新发送。",
-      parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [[
-          { text: "我不是机器人 [点击验证]", callback_data: "verify_user" }
-        ]]
-      }
+      text: "⚠️ **请先点击上方的验证按钮完成验证。**\n只有验证通过后，管理员才能收到您的消息。",
+      parse_mode: "Markdown"
     });
     return; 
   }
 
+  // 原有逻辑：指令过滤
+  if (msg.text && msg.text.startsWith("/")) return;
+
   await forwardToTopic(msg, userId, key, env, ctx);
 }
 
-// --- 转发到话题 logic (保持原样) ---
+// --- 以下所有原始函数保持原样，不做任何修改 ---
+
 async function forwardToTopic(msg, userId, key, env, ctx) {
     let rec = await env.TOPIC_MAP.get(key, { type: "json" });
     if (rec && rec.closed) {
