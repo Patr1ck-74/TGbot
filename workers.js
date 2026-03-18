@@ -244,17 +244,16 @@ function buildTopicTitle(msg) {
   return `${name} #${userId}`.slice(0, 64);
 }
 
-function updateThreadStatus(threadId, isClosed, env) {
-    return env.TOPIC_MAP.list({ prefix: "user:" }).then(list => {
-        for (const { name } of list.keys) {
-            env.TOPIC_MAP.get(name, { type: "json" }).then(rec => {
-                if (rec && Number(rec.thread_id) === Number(threadId)) {
-                    rec.closed = isClosed;
-                    env.TOPIC_MAP.put(name, JSON.stringify(rec));
-                }
-            });
+async function updateThreadStatus(threadId, isClosed, env) {
+    const list = await env.TOPIC_MAP.list({ prefix: "user:" });
+    for (const { name } of list.keys) {
+        const rec = await env.TOPIC_MAP.get(name, { type: "json" });
+        if (rec && Number(rec.thread_id) === Number(threadId)) {
+            rec.closed = isClosed;
+            await env.TOPIC_MAP.put(name, JSON.stringify(rec));
+            break;
         }
-    });
+    }
 }
 
 async function tgCall(env, method, body) {
