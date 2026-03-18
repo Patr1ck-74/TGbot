@@ -93,8 +93,7 @@ async function handlePrivateMessage(msg, env, ctx) {
   const key = `user:${userId}`;
   const text = (msg.text || "").trim();
 
-  const isBanned = await env.TOPIC_MAP.get(`banned:${userId}`);
-  if (isBanned) return;
+
 
   const isVerified = await env.TOPIC_MAP.get(`verified:${userId}`);
 
