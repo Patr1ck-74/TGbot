@@ -51,7 +51,19 @@
 - `/uf <uid>`
   - 手动解封指定 UID（短命令）
 
+- `/clean <uid>`
+  - 清理某个用户在 KV 中的状态数据（话题映射、验证状态、反骚扰状态、限流计数等）
+
+- `/cleanstale [maxScan]`
+  - 温和清理：仅处理“过期验证会话 + 已到期冷却状态”
+  - `maxScan` 可选，默认 600，范围 50~5000
+
+- `/cleanall confirm [maxKeys]`
+  - 危险操作：按前缀批量清理全量 `shaw:` 键
+  - `maxKeys` 可选，默认 300，最大 2000（用于避免单次执行过重）
+
 > 注：管理员命令仅群管理员/群主可用。
+> 建议优先用 `/cleanstale` 或 `/clean <uid>`，`/cleanall` 仅在你明确知道影响范围时使用。
 
 ---
 
@@ -113,3 +125,11 @@ curl "https://api.telegram.org/bot<你的BOT_TOKEN>/getWebhookInfo"
 可以，管理员在群主聊天区使用：
 - `/cl`（列表+按钮解封）
 - `/uf <uid>`（指定 UID 解封）
+
+### 4) 如何清理 KV 状态数据？
+
+- 温和清理（推荐）：`/cleanstale [maxScan]`
+- 清理单个用户：`/clean <uid>`
+- 批量清理全量：`/cleanall confirm [maxKeys]`
+
+`/cleanall` 是危险操作，建议分批执行并确认无误后再继续。

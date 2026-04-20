@@ -594,12 +594,69 @@ async function handleSupergroupControlCommand(msg, env) {
     return;
   }
 
+  if (text.startsWith("/cleanstale")) {
+    const maxScan = Math.min(5000, Math.max(50, Number(text.split(/\s+/)[1]) || 600));
+    const stats = await cleanupExpiredAndCooldownData(env, maxScan);
+
+    await shawTelegramCall(env, "sendMessage", {
+      chat_id: Number(env.SUPERGROUP_ID),
+      text: [
+        `🧽 过期/冷却数据清理完成（扫描上限 ${maxScan}）`,
+        `- 删除过期验证会话：${stats.verifyDeleted}`,
+        `- 清空已到期冷却：${stats.cooldownReset}`,
+        stats.hasMore ? "仍有剩余可扫描数据，请再次执行 /cleanstale" : "已扫描完成",
+      ].join("\n"),
+    });
+    return;
+  }
+
+  if (text.startsWith("/cleanall")) {
+    const args = text.split(/\s+/);
+    if (args[1] !== "confirm") {
+      await shawTelegramCall(env, "sendMessage", {
+        chat_id: Number(env.SUPERGROUP_ID),
+        text: "⚠️ 危险操作。用法：/cleanall confirm [maxKeys]（默认 300，最大 2000）",
+      });
+      return;
+    }
+
+    const maxKeys = Math.min(2000, Math.max(1, Number(args[2]) || 300));
+    const purged = await purgePrefixKeys(env, "shaw:", maxKeys);
+
+    await shawTelegramCall(env, "sendMessage", {
+      chat_id: Number(env.SUPERGROUP_ID),
+      text: [
+        `🧹 已清理 ${purged.deleted} 个 KV 键（上限 ${maxKeys}）`,
+        purged.hasMore ? "仍有剩余数据，请再次执行 /cleanall confirm" : "已清理完成",
+      ].join("\n"),
+    });
+    return;
+  }
+
+  if (text.startsWith("/clean")) {
+    const uid = Number(text.split(/\s+/)[1]);
+    if (!uid) {
+      await shawTelegramCall(env, "sendMessage", {
+        chat_id: Number(env.SUPERGROUP_ID),
+        text: "用法：/clean <uid>\n示例：/clean 123456789",
+      });
+      return;
+    }
+
+    const stats = await cleanupUserScopedData(uid, env);
+    await shawTelegramCall(env, "sendMessage", {
+      chat_id: Number(env.SUPERGROUP_ID),
+      text: `🧹 已清理 UID ${uid} 的 ${stats.deleted} 个键${stats.hasMore ? "（仍有剩余 rate-limit 键，可再执行一次）" : ""}`,
+    });
+    return;
+  }
+
   if (text.startsWith("/uf")) {
     const uid = Number(text.split(/\s+/)[1]);
     if (!uid) {
       await shawTelegramCall(env, "sendMessage", {
         chat_id: Number(env.SUPERGROUP_ID),
-        text: "用法：/uf <uid>  或  /cl",
+        text: "用法：/uf <uid>、/cl、/clean <uid>、/cleanstale [maxScan]、/cleanall confirm [maxKeys]",
       });
       return;
     }
@@ -719,6 +776,127 @@ async function unfreezeUser(userId, env) {
   profile.cooldownUntil = 0;
   await setUserProfile(userId, profile, env);
   return true;
+}
+
+async function cleanupUserScopedData(userId, env) {
+  let deleted = 0;
+
+  const topic = await getUserTopicIfExists(userId, env);
+  if (topic?.threadId) {
+    await env.PM.delete(SHAW_KV.userByThread(topic.threadId));
+    deleted += 1;
+  }
+
+  const fixedKeys = [
+    SHAW_KV.topicByUser(userId),
+    SHAW_KV.userProfile(userId),
+    SHAW_KV.verifySession(userId),
+    SHAW_KV.spamState(userId),
+  ];
+
+  for (const key of fixedKeys) {
+    await env.PM.delete(key);
+    deleted += 1;
+  }
+
+  const rl = await purgePrefixKeys(env, `shaw:rl:${userId}:`, 500);
+  deleted += rl.deleted;
+
+  return { deleted, hasMore: rl.hasMore };
+}
+
+async function purgePrefixKeys(env, prefix, maxDeletes) {
+  let deleted = 0;
+  let cursor = undefined;
+  let hasMore = false;
+
+  do {
+    const page = await env.PM.list({ prefix, cursor });
+
+    for (const { name } of page.keys) {
+      if (deleted >= maxDeletes) {
+        hasMore = true;
+        return { deleted, hasMore };
+      }
+      await env.PM.delete(name);
+      deleted += 1;
+    }
+
+    if (page.list_complete) {
+      cursor = undefined;
+      break;
+    }
+
+    cursor = page.cursor;
+  } while (cursor);
+
+  return { deleted, hasMore };
+}
+
+async function cleanupExpiredAndCooldownData(env, maxScan) {
+  const now = Date.now();
+  let budget = maxScan;
+  let hasMore = false;
+  let verifyDeleted = 0;
+  let cooldownReset = 0;
+
+  let cursor = undefined;
+  do {
+    const page = await env.PM.list({ prefix: "shaw:verify:", cursor });
+
+    for (const { name } of page.keys) {
+      if (budget <= 0) {
+        hasMore = true;
+        return { verifyDeleted, cooldownReset, hasMore };
+      }
+
+      budget -= 1;
+      const session = await env.PM.get(name, { type: "json" });
+      if (!session || !session.expiresAt || now > Number(session.expiresAt)) {
+        await env.PM.delete(name);
+        verifyDeleted += 1;
+      }
+    }
+
+    if (page.list_complete) {
+      cursor = undefined;
+      break;
+    }
+
+    cursor = page.cursor;
+  } while (cursor);
+
+  cursor = undefined;
+  do {
+    const page = await env.PM.list({ prefix: "shaw:user:", cursor });
+
+    for (const { name } of page.keys) {
+      if (!name.endsWith(":profile")) continue;
+
+      if (budget <= 0) {
+        hasMore = true;
+        return { verifyDeleted, cooldownReset, hasMore };
+      }
+
+      budget -= 1;
+      const profile = await env.PM.get(name, { type: "json" });
+      if (!profile?.cooldownUntil) continue;
+      if (profile.cooldownUntil > now) continue;
+
+      profile.cooldownUntil = 0;
+      await env.PM.put(name, JSON.stringify(profile));
+      cooldownReset += 1;
+    }
+
+    if (page.list_complete) {
+      cursor = undefined;
+      break;
+    }
+
+    cursor = page.cursor;
+  } while (cursor);
+
+  return { verifyDeleted, cooldownReset, hasMore };
 }
 
 async function handleSupergroupThreadMessage(msg, env, ctx) {
