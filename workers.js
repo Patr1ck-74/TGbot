@@ -273,6 +273,16 @@ async function handlePrivateChatMessage(msg, env, ctx) {
 
   if (msg.text?.startsWith("/")) return;
 
+  // 对话已关闭时，不进入限流和反骚扰计数，直接提示
+  const topicSnapshot = await getUserTopicIfExists(userId, env);
+  if (topicSnapshot?.closed) {
+    await shawTelegramCall(env, "sendMessage", {
+      chat_id: userId,
+      text: "🚫 当前对话已被管理员关闭。",
+    });
+    return;
+  }
+
   const isNewUser = now - (profile.verifiedAt || now) < SHAW_SETTINGS.trust.newUserWindowMs;
   const limiterRules = isNewUser ? SHAW_SETTINGS.rateLimit.newcomer : SHAW_SETTINGS.rateLimit.normal;
   const allowed = await consumeRateLimit(userId, limiterRules, env, now);
@@ -531,17 +541,20 @@ async function recreateTopicAndRefwd(msg, userId, env, forwarded) {
     });
   }
 
+  // 话题失效（包括管理员手动删除）后：清理映射并强制重新验证
+  const oldTopic = await getUserTopicIfExists(userId, env);
   await env.PM.delete(SHAW_KV.topicByUser(userId));
+  if (oldTopic?.threadId) {
+    await env.PM.delete(SHAW_KV.userByThread(oldTopic.threadId));
+  }
+  await resetUserVerification(userId, env);
 
-  const topic = await getOrCreateUserTopic(msg, userId, env);
-  await shawTelegramCall(env, "forwardMessage", {
-    chat_id: Number(env.SUPERGROUP_ID),
-    from_chat_id: userId,
-    message_id: msg.message_id,
-    message_thread_id: topic.threadId,
+  await shawTelegramCall(env, "sendMessage", {
+    chat_id: userId,
+    text: "⚠️ 对话会话已失效（可能被管理员删除话题）。请先重新验证后再发消息：/start",
   });
 
-  return topic;
+  return null;
 }
 
 async function handleSupergroupThreadMessage(msg, env, ctx) {
@@ -586,19 +599,28 @@ async function handleSupergroupThreadMessage(msg, env, ctx) {
     const fullName = `${r.first_name || ""} ${r.last_name || ""}`.trim() || "Unknown";
     const profile = await getUserProfile(userId, env);
     const verifiedText = profile.verified ? "是" : "否";
+    const username = r.username ? `@${r.username}` : "无";
+
+    const directUrl = r.username ? `https://t.me/${r.username}` : `tg://user?id=${userId}`;
 
     const info = [
-      "👤 用户信息",
-      `UID: ${userId}`,
-      `Name: ${fullName}`,
-      `Verified: ${verifiedText}`,
-      `Link: tg://user?id=${userId}`,
+      "👤 <b>用户信息</b>",
+      `UID: <code>${userId}</code>`,
+      `Name: <code>${escapeHtml(fullName)}</code>`,
+      `Username: <code>${escapeHtml(username)}</code>`,
+      `Verified: <b>${verifiedText}</b>`,
+      "注：若客户端不支持 tg:// 直链，请用下方按钮。",
     ].join("\n");
 
     await shawTelegramCall(env, "sendMessage", {
       chat_id: Number(env.SUPERGROUP_ID),
       message_thread_id: threadId,
       text: info,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: {
+        inline_keyboard: [[{ text: "打开用户资料/私聊", url: directUrl }]],
+      },
     });
     return;
   }
@@ -617,6 +639,19 @@ async function handleSupergroupThreadMessage(msg, env, ctx) {
     from_chat_id: Number(env.SUPERGROUP_ID),
     message_id: msg.message_id,
   });
+}
+
+async function getUserTopicIfExists(userId, env) {
+  return await env.PM.get(SHAW_KV.topicByUser(userId), { type: "json" });
+}
+
+async function resetUserVerification(userId, env) {
+  const profile = await getUserProfile(userId, env);
+  profile.verified = false;
+  profile.verifiedAt = 0;
+  profile.cooldownUntil = 0;
+  await setUserProfile(userId, profile, env);
+  await env.PM.delete(SHAW_KV.verifySession(userId));
 }
 
 async function setTopicClosedByThread(threadId, closed, env) {
@@ -749,4 +784,13 @@ function shuffleArray(arr) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
