@@ -107,7 +107,17 @@ export default {
         await handleSupergroupThreadMessage(msg, env, ctx);
       }
     } catch (err) {
-      console.error("Unhandled error:", err?.message || err);
+      const errorText = err?.message || String(err);
+      console.error("Unhandled error:", errorText);
+
+      // 避免静默失败：私聊场景下把关键错误回给用户，便于排障
+      const privateChatId = update?.message?.chat?.type === "private" ? update.message.chat.id : null;
+      if (privateChatId) {
+        await shawTelegramCall(env, "sendMessage", {
+          chat_id: privateChatId,
+          text: `⚠️ 转发失败：${String(errorText).slice(0, 180)}`,
+        });
+      }
     }
 
     return new Response("OK");
@@ -409,7 +419,7 @@ async function consumeRateLimit(userId, rules, env, nowMs) {
     if (current >= rule.limit) return false;
 
     await env.PM.put(key, String(current + 1), {
-      expirationTtl: rule.windowSec + 5,
+      expirationTtl: Math.max(60, rule.windowSec + 5),
     });
   }
 
