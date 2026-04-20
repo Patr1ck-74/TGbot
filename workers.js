@@ -115,7 +115,7 @@ export default {
 };
 
 function validateEnv(env) {
-  if (!env.TOPIC_MAP) return "Error: KV 'TOPIC_MAP' not bound.";
+  if (!env.PM) return "Error: KV 'PM' not bound.";
   if (!env.BOT_TOKEN) return "Error: BOT_TOKEN not set.";
   if (!env.SUPERGROUP_ID) return "Error: SUPERGROUP_ID not set.";
   return "";
@@ -166,7 +166,7 @@ async function handleCallbackQuery(query, env) {
   }
 
   const key = SHAW_KV.verifySession(userId);
-  const session = await env.TOPIC_MAP.get(key, { type: "json" });
+  const session = await env.PM.get(key, { type: "json" });
   const now = Date.now();
 
   if (!session || session.nonce !== nonce || now > session.expiresAt) {
@@ -180,7 +180,7 @@ async function handleCallbackQuery(query, env) {
 
   if (selectedIndex === session.correctIndex) {
     await markUserVerified(userId, env, now);
-    await env.TOPIC_MAP.delete(key);
+    await env.PM.delete(key);
 
     await shawTelegramCall(env, "answerCallbackQuery", {
       callback_query_id: query.id,
@@ -203,7 +203,7 @@ async function handleCallbackQuery(query, env) {
     const profile = await getUserProfile(userId, env);
     profile.cooldownUntil = now + SHAW_SETTINGS.antiSpam.cooldownMs;
     await setUserProfile(userId, profile, env);
-    await env.TOPIC_MAP.delete(key);
+    await env.PM.delete(key);
 
     await shawTelegramCall(env, "answerCallbackQuery", {
       callback_query_id: query.id,
@@ -221,7 +221,7 @@ async function handleCallbackQuery(query, env) {
     return;
   }
 
-  await env.TOPIC_MAP.put(key, JSON.stringify(session), { expirationTtl: SHAW_SETTINGS.verify.ttlSec });
+  await env.PM.put(key, JSON.stringify(session), { expirationTtl: SHAW_SETTINGS.verify.ttlSec });
 
   await shawTelegramCall(env, "answerCallbackQuery", {
     callback_query_id: query.id,
@@ -289,7 +289,7 @@ async function handlePrivateChatMessage(msg, env, ctx) {
 }
 
 async function ensureVerificationPrompt(userId, env) {
-  const active = await env.TOPIC_MAP.get(SHAW_KV.verifySession(userId), { type: "json" });
+  const active = await env.PM.get(SHAW_KV.verifySession(userId), { type: "json" });
   if (active && Date.now() <= active.expiresAt) {
     await shawTelegramCall(env, "sendMessage", {
       chat_id: userId,
@@ -312,7 +312,7 @@ async function sendVerificationChallenge(userId, env) {
     type: challenge.type,
   };
 
-  await env.TOPIC_MAP.put(SHAW_KV.verifySession(userId), JSON.stringify(session), {
+  await env.PM.put(SHAW_KV.verifySession(userId), JSON.stringify(session), {
     expirationTtl: SHAW_SETTINGS.verify.ttlSec,
   });
 
@@ -384,7 +384,7 @@ async function markUserVerified(userId, env, now) {
 }
 
 async function getUserProfile(userId, env) {
-  const profile = await env.TOPIC_MAP.get(SHAW_KV.userProfile(userId), { type: "json" });
+  const profile = await env.PM.get(SHAW_KV.userProfile(userId), { type: "json" });
   return (
     profile || {
       verified: false,
@@ -395,7 +395,7 @@ async function getUserProfile(userId, env) {
 }
 
 async function setUserProfile(userId, profile, env) {
-  await env.TOPIC_MAP.put(SHAW_KV.userProfile(userId), JSON.stringify(profile));
+  await env.PM.put(SHAW_KV.userProfile(userId), JSON.stringify(profile));
 }
 
 async function consumeRateLimit(userId, rules, env, nowMs) {
@@ -404,11 +404,11 @@ async function consumeRateLimit(userId, rules, env, nowMs) {
   for (const rule of rules) {
     const bucket = Math.floor(nowSec / rule.windowSec);
     const key = SHAW_KV.rateLimit(userId, rule.windowSec, bucket);
-    const current = Number((await env.TOPIC_MAP.get(key)) || "0");
+    const current = Number((await env.PM.get(key)) || "0");
 
     if (current >= rule.limit) return false;
 
-    await env.TOPIC_MAP.put(key, String(current + 1), {
+    await env.PM.put(key, String(current + 1), {
       expirationTtl: rule.windowSec + 5,
     });
   }
@@ -419,7 +419,7 @@ async function consumeRateLimit(userId, rules, env, nowMs) {
 async function evaluateRepeatSpam(userId, text, env, now) {
   const key = SHAW_KV.spamState(userId);
   const state =
-    (await env.TOPIC_MAP.get(key, { type: "json" })) ||
+    (await env.PM.get(key, { type: "json" })) ||
     { hash: "", count: 0, lastAt: 0 };
 
   const normalized = normalizeText(text);
@@ -433,7 +433,7 @@ async function evaluateRepeatSpam(userId, text, env, now) {
   }
 
   state.lastAt = now;
-  await env.TOPIC_MAP.put(key, JSON.stringify(state), { expirationTtl: 24 * 3600 });
+  await env.PM.put(key, JSON.stringify(state), { expirationTtl: 24 * 3600 });
 
   if (state.count >= SHAW_SETTINGS.antiSpam.repeatThreshold) {
     const profile = await getUserProfile(userId, env);
@@ -480,7 +480,7 @@ async function forwardPrivateMessageToTopic(msg, userId, env, ctx) {
 }
 
 async function getOrCreateUserTopic(msg, userId, env) {
-  const existing = await env.TOPIC_MAP.get(SHAW_KV.topicByUser(userId), { type: "json" });
+  const existing = await env.PM.get(SHAW_KV.topicByUser(userId), { type: "json" });
   if (existing?.threadId) return existing;
 
   const title = buildTopicTitle(msg);
@@ -499,8 +499,8 @@ async function getOrCreateUserTopic(msg, userId, env) {
     createdAt: Date.now(),
   };
 
-  await env.TOPIC_MAP.put(SHAW_KV.topicByUser(userId), JSON.stringify(record));
-  await env.TOPIC_MAP.put(SHAW_KV.userByThread(record.threadId), String(userId));
+  await env.PM.put(SHAW_KV.topicByUser(userId), JSON.stringify(record));
+  await env.PM.put(SHAW_KV.userByThread(record.threadId), String(userId));
 
   return record;
 }
@@ -521,7 +521,7 @@ async function recreateTopicAndRefwd(msg, userId, env, forwarded) {
     });
   }
 
-  await env.TOPIC_MAP.delete(SHAW_KV.topicByUser(userId));
+  await env.PM.delete(SHAW_KV.topicByUser(userId));
 
   const topic = await getOrCreateUserTopic(msg, userId, env);
   await shawTelegramCall(env, "forwardMessage", {
@@ -547,7 +547,7 @@ async function handleSupergroupThreadMessage(msg, env, ctx) {
     return;
   }
 
-  const userId = Number(await env.TOPIC_MAP.get(SHAW_KV.userByThread(threadId)) || 0);
+  const userId = Number(await env.PM.get(SHAW_KV.userByThread(threadId)) || 0);
   if (!userId) return;
 
   const text = (msg.text || "").trim();
@@ -610,15 +610,15 @@ async function handleSupergroupThreadMessage(msg, env, ctx) {
 }
 
 async function setTopicClosedByThread(threadId, closed, env) {
-  const userId = Number(await env.TOPIC_MAP.get(SHAW_KV.userByThread(threadId)) || 0);
+  const userId = Number(await env.PM.get(SHAW_KV.userByThread(threadId)) || 0);
   if (!userId) return;
 
   const key = SHAW_KV.topicByUser(userId);
-  const topic = await env.TOPIC_MAP.get(key, { type: "json" });
+  const topic = await env.PM.get(key, { type: "json" });
   if (!topic) return;
 
   topic.closed = closed;
-  await env.TOPIC_MAP.put(key, JSON.stringify(topic));
+  await env.PM.put(key, JSON.stringify(topic));
 }
 
 function buildTopicTitle(msg) {
@@ -647,13 +647,13 @@ async function collectAndFlushMediaGroup(msg, env, ctx, { direction, targetChatI
   const now = Date.now();
 
   const record =
-    (await env.TOPIC_MAP.get(key, { type: "json" })) ||
+    (await env.PM.get(key, { type: "json" })) ||
     { targetChatId, threadId, items: [], lastAt: now };
 
   record.items.push(media);
   record.lastAt = now;
 
-  await env.TOPIC_MAP.put(key, JSON.stringify(record), { expirationTtl: 60 });
+  await env.PM.put(key, JSON.stringify(record), { expirationTtl: 60 });
   ctx.waitUntil(flushMediaGroupAfterDelay(env, key, now));
 }
 
@@ -673,7 +673,7 @@ function extractMedia(msg) {
 async function flushMediaGroupAfterDelay(env, key, expectedTs) {
   await sleep(SHAW_SETTINGS.mediaGroupFlushDelayMs);
 
-  const record = await env.TOPIC_MAP.get(key, { type: "json" });
+  const record = await env.PM.get(key, { type: "json" });
   if (!record || record.lastAt !== expectedTs) return;
 
   const payload = {
@@ -691,7 +691,7 @@ async function flushMediaGroupAfterDelay(env, key, expectedTs) {
     await shawTelegramCall(env, "sendMediaGroup", payload);
   }
 
-  await env.TOPIC_MAP.delete(key);
+  await env.PM.delete(key);
 }
 
 async function shawTelegramCall(env, method, body) {

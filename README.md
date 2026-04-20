@@ -32,7 +32,7 @@
 
 ### 1) KV 绑定（必须）
 
-- 绑定变量名：`TOPIC_MAP`（必须是这个名字）
+- 绑定变量名：`PM`（必须是这个名字）
 - 绑定到任意一个 KV Namespace（可新建）
 
 ### 2) 环境变量（必须）
@@ -62,51 +62,4 @@ https://api.telegram.org/bot<你的BOT_TOKEN>/setWebhook?url=https://<你的Work
 curl "https://api.telegram.org/bot<你的BOT_TOKEN>/getWebhookInfo"
 ```
 
----
 
-## 你问的几个关键问题
-
-### 1) KV 需要改名字吗？
-
-**不需要改绑定名**。Cloudflare 里绑定变量名仍然是：`TOPIC_MAP`。
-
-但这次重构后，代码内部 KV key 前缀变成了 `shaw:*`。
-这意味着：
-
-- 旧版存量键（如 `user:*`, `verified:*`）不会被新逻辑读取；
-- 建议使用**新的 KV Namespace**，或者清理旧键，避免历史数据干扰排查。
-
-### 2) 是否所有类型消息都能转发？
-
-大多数常见消息都可以。
-
-#### 私聊 → 话题
-
-- 普通消息：通过 `forwardMessage`（文本、图片、视频、贴纸、语音、文件等常见类型）
-- 媒体组：
-  - `photo/video/document` 会尝试按组聚合后 `sendMediaGroup`
-  - 其他不在聚合名单中的媒体组内容会回退为单条 `copyMessage`
-
-#### 话题 → 私聊
-
-- 管理员回复使用 `copyMessage`，支持绝大多数常见消息
-
-#### 不在本 Worker 处理范围
-
-- Inline Query 等非 `message/callback_query` 类型更新
-- Telegram 系统服务类更新并不保证全部可转发（这是 Bot API 常见限制）
-
----
-
-## 参数调优位置
-
-在 `workers.js` 的 `SHAW_SETTINGS` 中可直接调：
-
-- `verify.ttlSec`
-- `verify.maxAttempts`
-- `rateLimit.newcomer / normal`
-- `antiSpam.repeatWindowMs`
-- `antiSpam.repeatThreshold`
-- `antiSpam.cooldownMs`
-
----
