@@ -597,19 +597,13 @@ async function handleSupergroupThreadMessage(msg, env, ctx) {
     const chatInfo = await shawTelegramCall(env, "getChat", { chat_id: userId });
     const r = chatInfo.result || {};
     const fullName = `${r.first_name || ""} ${r.last_name || ""}`.trim() || "Unknown";
-    const profile = await getUserProfile(userId, env);
-    const verifiedText = profile.verified ? "是" : "否";
     const username = r.username ? `@${r.username}` : "无";
-
-    const directUrl = r.username ? `https://t.me/${r.username}` : `tg://user?id=${userId}`;
 
     const info = [
       "👤 <b>用户信息</b>",
       `UID: <code>${userId}</code>`,
       `Name: <code>${escapeHtml(fullName)}</code>`,
       `Username: <code>${escapeHtml(username)}</code>`,
-      `Verified: <b>${verifiedText}</b>`,
-      "注：若客户端不支持 tg:// 直链，请用下方按钮。",
     ].join("\n");
 
     await shawTelegramCall(env, "sendMessage", {
@@ -619,7 +613,7 @@ async function handleSupergroupThreadMessage(msg, env, ctx) {
       parse_mode: "HTML",
       disable_web_page_preview: true,
       reply_markup: {
-        inline_keyboard: [[{ text: "打开用户资料/私聊", url: directUrl }]],
+        inline_keyboard: [[{ text: "打开用户资料", url: `tg://user?id=${userId}` }]],
       },
     });
     return;
