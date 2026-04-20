@@ -103,8 +103,14 @@ export default {
       }
 
       const supergroupId = Number(env.SUPERGROUP_ID);
-      if (Number(msg.chat?.id) === supergroupId && msg.message_thread_id) {
-        await handleSupergroupThreadMessage(msg, env, ctx);
+      if (Number(msg.chat?.id) === supergroupId) {
+        if (!msg.message_thread_id && msg.text?.startsWith("/")) {
+          await handleSupergroupControlCommand(msg, env);
+          return new Response("OK");
+        }
+        if (msg.message_thread_id) {
+          await handleSupergroupThreadMessage(msg, env, ctx);
+        }
       }
     } catch (err) {
       const errorText = err?.message || String(err);
@@ -135,7 +141,21 @@ async function handleCallbackQuery(query, env) {
   const userId = query.from?.id;
   const data = query.data || "";
 
-  if (!userId || !data.startsWith("verify|")) {
+  if (!userId) {
+    await shawTelegramCall(env, "answerCallbackQuery", {
+      callback_query_id: query.id,
+      text: "无效操作",
+      show_alert: false,
+    });
+    return;
+  }
+
+  if (data.startsWith("admin_unfreeze|")) {
+    await handleAdminUnfreezeCallback(query, env);
+    return;
+  }
+
+  if (!data.startsWith("verify|")) {
     await shawTelegramCall(env, "answerCallbackQuery", {
       callback_query_id: query.id,
       text: "无效操作",
@@ -555,6 +575,150 @@ async function recreateTopicAndRefwd(msg, userId, env, forwarded) {
   });
 
   return null;
+}
+
+async function handleSupergroupControlCommand(msg, env) {
+  const text = (msg.text || "").trim();
+
+  const isAdmin = await isGroupAdmin(env, Number(env.SUPERGROUP_ID), msg.from?.id);
+  if (!isAdmin) {
+    await shawTelegramCall(env, "sendMessage", {
+      chat_id: Number(env.SUPERGROUP_ID),
+      text: "仅管理员可用。",
+    });
+    return;
+  }
+
+  if (text === "/cl" || text === "/cool") {
+    await sendCooldownList(msg, env);
+    return;
+  }
+
+  if (text.startsWith("/uf")) {
+    const uid = Number(text.split(/\s+/)[1]);
+    if (!uid) {
+      await shawTelegramCall(env, "sendMessage", {
+        chat_id: Number(env.SUPERGROUP_ID),
+        text: "用法：/uf <uid>  或  /cl",
+      });
+      return;
+    }
+
+    const ok = await unfreezeUser(uid, env);
+    await shawTelegramCall(env, "sendMessage", {
+      chat_id: Number(env.SUPERGROUP_ID),
+      text: ok ? `✅ 已解封 UID ${uid}` : `⚠️ UID ${uid} 当前无冷却或不存在`,
+    });
+    return;
+  }
+}
+
+async function handleAdminUnfreezeCallback(query, env) {
+  const groupId = Number(env.SUPERGROUP_ID);
+  if (Number(query.message?.chat?.id) !== groupId) {
+    await shawTelegramCall(env, "answerCallbackQuery", {
+      callback_query_id: query.id,
+      text: "仅限群组内操作",
+      show_alert: true,
+    });
+    return;
+  }
+
+  const isAdmin = await isGroupAdmin(env, groupId, query.from?.id);
+  if (!isAdmin) {
+    await shawTelegramCall(env, "answerCallbackQuery", {
+      callback_query_id: query.id,
+      text: "仅管理员可操作",
+      show_alert: true,
+    });
+    return;
+  }
+
+  const uid = Number((query.data || "").split("|")[1]);
+  const ok = uid ? await unfreezeUser(uid, env) : false;
+
+  await shawTelegramCall(env, "answerCallbackQuery", {
+    callback_query_id: query.id,
+    text: ok ? `已解封 ${uid}` : "该用户当前无冷却",
+    show_alert: false,
+  });
+
+  if (query.message?.message_id) {
+    await shawTelegramCall(env, "editMessageReplyMarkup", {
+      chat_id: groupId,
+      message_id: query.message.message_id,
+      reply_markup: { inline_keyboard: [] },
+    });
+  }
+}
+
+async function sendCooldownList(msg, env) {
+  const now = Date.now();
+  const users = await listCoolingUsers(env, now);
+
+  if (users.length === 0) {
+    await shawTelegramCall(env, "sendMessage", {
+      chat_id: Number(env.SUPERGROUP_ID),
+      text: "当前没有处于冷却中的用户。",
+    });
+    return;
+  }
+
+  const top = users.slice(0, 20);
+  const lines = top.map((u, idx) => `${idx + 1}. UID ${u.uid}（剩余 ${u.leftMin} 分钟）`);
+
+  await shawTelegramCall(env, "sendMessage", {
+    chat_id: Number(env.SUPERGROUP_ID),
+    text: [
+      `⏳ 冷却列表（共 ${users.length} 人，展示前 ${top.length}）`,
+      ...lines,
+      "\n点击下方按钮可直接解封",
+    ].join("\n"),
+    reply_markup: {
+      inline_keyboard: top.map((u) => [{ text: `解封 ${u.uid}`, callback_data: `admin_unfreeze|${u.uid}` }]),
+    },
+  });
+}
+
+async function listCoolingUsers(env, now) {
+  const result = [];
+  let cursor = undefined;
+
+  do {
+    const page = await env.PM.list({ prefix: "shaw:user:", cursor });
+    for (const { name } of page.keys) {
+      if (!name.endsWith(":profile")) continue;
+      const uid = Number(name.split(":")[2]);
+      if (!uid) continue;
+
+      const profile = await env.PM.get(name, { type: "json" });
+      if (!profile?.cooldownUntil || profile.cooldownUntil <= now) continue;
+
+      result.push({ uid, leftMin: Math.ceil((profile.cooldownUntil - now) / 60000) });
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+
+  result.sort((a, b) => b.leftMin - a.leftMin);
+  return result;
+}
+
+async function isGroupAdmin(env, groupId, userId) {
+  if (!userId) return false;
+  const res = await shawTelegramCall(env, "getChatMember", {
+    chat_id: groupId,
+    user_id: userId,
+  });
+  const status = res?.result?.status;
+  return status === "creator" || status === "administrator";
+}
+
+async function unfreezeUser(userId, env) {
+  const profile = await getUserProfile(userId, env);
+  if (!profile.cooldownUntil || profile.cooldownUntil <= Date.now()) return false;
+  profile.cooldownUntil = 0;
+  await setUserProfile(userId, profile, env);
+  return true;
 }
 
 async function handleSupergroupThreadMessage(msg, env, ctx) {
