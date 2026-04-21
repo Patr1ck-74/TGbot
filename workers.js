@@ -13,12 +13,14 @@ const SHAW_KV = {
   spamState: (userId) => `shaw:spam:${userId}`,
   mediaGroup: (direction, mediaGroupId) => `shaw:mg:${direction}:${mediaGroupId}`,
   rateLimit: (userId, windowSec, bucket) => `shaw:rl:${userId}:${windowSec}:${bucket}`,
+  topicCreateLock: (userId) => `shaw:lock:topic:${userId}`,
 };
 
 const SHAW_SETTINGS = {
   verify: {
     ttlSec: 180,
     maxAttempts: 3,
+    optionCount: 6,
   },
   trust: {
     newUserWindowMs: 24 * 60 * 60 * 1000,
@@ -360,30 +362,58 @@ async function sendVerificationChallenge(userId, env) {
     chat_id: userId,
     text: `🛡️ Shaw 安全验证（${Math.floor(SHAW_SETTINGS.verify.ttlSec / 60)} 分钟内有效）\n\n${challenge.question}`,
     reply_markup: {
-      inline_keyboard: [
-        challenge.options.map((optionText, idx) => ({
-          text: optionText,
-          callback_data: `verify|${challenge.nonce}|${idx}`,
-        })),
-      ],
+      inline_keyboard: buildVerifyKeyboard(challenge.options, challenge.nonce),
     },
   });
 }
 
+function buildVerifyKeyboard(options, nonce) {
+  const cols = 3;
+  const rows = [];
+  for (let i = 0; i < options.length; i += cols) {
+    rows.push(
+      options.slice(i, i + cols).map((optionText, idx) => ({
+        text: optionText,
+        callback_data: `verify|${nonce}|${i + idx}`,
+      }))
+    );
+  }
+  return rows;
+}
+
 function generateShawChallenge() {
-  const useMath = Math.random() < 0.55;
+  const useMath = Math.random() < 0.78;
   if (useMath) return generateShawMathChallenge();
   return generateShawCommonSenseChallenge();
 }
 
 function generateShawMathChallenge() {
-  const a = randomInt(1, 20);
-  const b = randomInt(1, 20);
-  const answer = a + b;
+  const style = randomInt(1, 3);
+  let question = "";
+  let answer = 0;
+
+  if (style === 1) {
+    const a = randomInt(5, 35);
+    const b = randomInt(1, 20);
+    answer = a - b;
+    question = `请计算：${a} - ${b} = ?`;
+  } else if (style === 2) {
+    const a = randomInt(2, 12);
+    const b = randomInt(2, 9);
+    answer = a * b;
+    question = `请计算：${a} × ${b} = ?`;
+  } else {
+    const a = randomInt(1, 20);
+    const b = randomInt(1, 20);
+    const c = randomInt(1, 15);
+    answer = a + b - c;
+    question = `请计算：${a} + ${b} - ${c} = ?`;
+  }
 
   const optionSet = new Set([answer]);
-  while (optionSet.size < 4) {
-    const offset = randomInt(-8, 8);
+  while (optionSet.size < SHAW_SETTINGS.verify.optionCount) {
+    const spread = Math.max(6, Math.ceil(Math.abs(answer) * 0.35));
+    const offset = randomInt(-spread, spread);
     const candidate = Math.max(0, answer + offset);
     optionSet.add(candidate);
   }
@@ -393,7 +423,7 @@ function generateShawMathChallenge() {
 
   return {
     type: "math",
-    question: `请计算：${a} + ${b} = ?`,
+    question,
     options,
     correctIndex,
     nonce: createNonce(),
@@ -521,28 +551,40 @@ async function forwardPrivateMessageToTopic(msg, userId, env, ctx) {
 
 async function getOrCreateUserTopic(msg, userId, env) {
   const existing = await env.PM.get(SHAW_KV.topicByUser(userId), { type: "json" });
-  if (existing?.threadId) return existing;
+  if (existing?.threadId) {
+    const reverse = Number(await env.PM.get(SHAW_KV.userByThread(existing.threadId)) || 0);
+    if (reverse !== userId) {
+      await env.PM.put(SHAW_KV.userByThread(existing.threadId), String(userId));
+    }
+    return existing;
+  }
 
-  const title = buildTopicTitle(msg);
-  const created = await shawTelegramCall(env, "createForumTopic", {
-    chat_id: Number(env.SUPERGROUP_ID),
-    name: title,
+  return await withUserTopicCreateLock(userId, env, async () => {
+    // 二次检查，避免并发下重复创建
+    const latest = await env.PM.get(SHAW_KV.topicByUser(userId), { type: "json" });
+    if (latest?.threadId) return latest;
+
+    const title = buildTopicTitle(msg);
+    const created = await shawTelegramCall(env, "createForumTopic", {
+      chat_id: Number(env.SUPERGROUP_ID),
+      name: title,
+    });
+
+    if (!created.ok) throw new Error(`创建话题失败: ${created.description}`);
+
+    const record = {
+      userId,
+      threadId: created.result.message_thread_id,
+      title,
+      closed: false,
+      createdAt: Date.now(),
+    };
+
+    await env.PM.put(SHAW_KV.topicByUser(userId), JSON.stringify(record));
+    await env.PM.put(SHAW_KV.userByThread(record.threadId), String(userId));
+
+    return record;
   });
-
-  if (!created.ok) throw new Error(`创建话题失败: ${created.description}`);
-
-  const record = {
-    userId,
-    threadId: created.result.message_thread_id,
-    title,
-    closed: false,
-    createdAt: Date.now(),
-  };
-
-  await env.PM.put(SHAW_KV.topicByUser(userId), JSON.stringify(record));
-  await env.PM.put(SHAW_KV.userByThread(record.threadId), String(userId));
-
-  return record;
 }
 
 async function recreateTopicAndRefwd(msg, userId, env, forwarded) {
@@ -561,20 +603,30 @@ async function recreateTopicAndRefwd(msg, userId, env, forwarded) {
     });
   }
 
-  // 话题失效（包括管理员手动删除）后：清理映射并强制重新验证
+  // 话题失效后仅重建映射，不再强制用户重新验证
   const oldTopic = await getUserTopicIfExists(userId, env);
   await env.PM.delete(SHAW_KV.topicByUser(userId));
   if (oldTopic?.threadId) {
     await env.PM.delete(SHAW_KV.userByThread(oldTopic.threadId));
   }
-  await resetUserVerification(userId, env);
 
-  await shawTelegramCall(env, "sendMessage", {
-    chat_id: userId,
-    text: "⚠️ 对话会话已失效（可能被管理员删除话题）。请先重新验证后再发消息：/start",
+  const newTopic = await getOrCreateUserTopic(msg, userId, env);
+  const retried = await shawTelegramCall(env, "forwardMessage", {
+    chat_id: Number(env.SUPERGROUP_ID),
+    from_chat_id: userId,
+    message_id: msg.message_id,
+    message_thread_id: newTopic.threadId,
   });
 
-  return null;
+  if (!retried.ok || !retried.result?.message_thread_id) {
+    await shawTelegramCall(env, "sendMessage", {
+      chat_id: userId,
+      text: "⚠️ 对话重建失败，请稍后重试。",
+    });
+    return null;
+  }
+
+  return newTopic;
 }
 
 async function handleSupergroupControlCommand(msg, env) {
@@ -586,6 +638,11 @@ async function handleSupergroupControlCommand(msg, env) {
       chat_id: Number(env.SUPERGROUP_ID),
       text: "仅管理员可用。",
     });
+    return;
+  }
+
+  if (text === "/help") {
+    await sendAdminHelp(env);
     return;
   }
 
@@ -605,29 +662,6 @@ async function handleSupergroupControlCommand(msg, env) {
         `- 删除过期验证会话：${stats.verifyDeleted}`,
         `- 清空已到期冷却：${stats.cooldownReset}`,
         stats.hasMore ? "仍有剩余可扫描数据，请再次执行 /cleanstale" : "已扫描完成",
-      ].join("\n"),
-    });
-    return;
-  }
-
-  if (text.startsWith("/cleanall")) {
-    const args = text.split(/\s+/);
-    if (args[1] !== "confirm") {
-      await shawTelegramCall(env, "sendMessage", {
-        chat_id: Number(env.SUPERGROUP_ID),
-        text: "⚠️ 危险操作。用法：/cleanall confirm [maxKeys]（默认 300，最大 2000）",
-      });
-      return;
-    }
-
-    const maxKeys = Math.min(2000, Math.max(1, Number(args[2]) || 300));
-    const purged = await purgePrefixKeys(env, "shaw:", maxKeys);
-
-    await shawTelegramCall(env, "sendMessage", {
-      chat_id: Number(env.SUPERGROUP_ID),
-      text: [
-        `🧹 已清理 ${purged.deleted} 个 KV 键（上限 ${maxKeys}）`,
-        purged.hasMore ? "仍有剩余数据，请再次执行 /cleanall confirm" : "已清理完成",
       ].join("\n"),
     });
     return;
@@ -656,7 +690,7 @@ async function handleSupergroupControlCommand(msg, env) {
     if (!uid) {
       await shawTelegramCall(env, "sendMessage", {
         chat_id: Number(env.SUPERGROUP_ID),
-        text: "用法：/uf <uid>、/cl、/clean <uid>、/cleanstale [maxScan]、/cleanall confirm [maxKeys]",
+        text: "用法：/uf <uid>、/cl、/clean <uid>、/cleanstale [maxScan]、/help",
       });
       return;
     }
@@ -707,6 +741,31 @@ async function handleAdminUnfreezeCallback(query, env) {
       reply_markup: { inline_keyboard: [] },
     });
   }
+}
+
+async function sendAdminHelp(env, threadId = null) {
+  const payload = {
+    chat_id: Number(env.SUPERGROUP_ID),
+    text: [
+      "🛠️ 管理员命令帮助",
+      "",
+      "群主聊天区（非话题）",
+      "/help - 查看本帮助",
+      "/cl 或 /cool - 查看冷却用户列表",
+      "/uf <uid> - 解封指定 UID",
+      "/clean <uid> - 清理指定 UID 的状态数据",
+      "/cleanstale [maxScan] - 清理过期验证会话与已到期冷却",
+      "",
+      "用户话题内",
+      "/help - 查看本帮助",
+      "/info - 查看当前用户信息",
+      "/close - 关闭当前对话",
+      "/open - 重新开启当前对话",
+    ].join("\n"),
+  };
+
+  if (threadId) payload.message_thread_id = threadId;
+  await shawTelegramCall(env, "sendMessage", payload);
 }
 
 async function sendCooldownList(msg, env) {
@@ -781,14 +840,8 @@ async function unfreezeUser(userId, env) {
 async function cleanupUserScopedData(userId, env) {
   let deleted = 0;
 
-  const topic = await getUserTopicIfExists(userId, env);
-  if (topic?.threadId) {
-    await env.PM.delete(SHAW_KV.userByThread(topic.threadId));
-    deleted += 1;
-  }
-
+  // 保留话题映射，避免未删 TG 话题时重复新建
   const fixedKeys = [
-    SHAW_KV.topicByUser(userId),
     SHAW_KV.userProfile(userId),
     SHAW_KV.verifySession(userId),
     SHAW_KV.spamState(userId),
@@ -935,6 +988,11 @@ async function handleSupergroupThreadMessage(msg, env, ctx) {
     return;
   }
 
+  if (text === "/help") {
+    await sendAdminHelp(env, threadId);
+    return;
+  }
+
   if (text === "/info") {
     const chatInfo = await shawTelegramCall(env, "getChat", { chat_id: userId });
     const r = chatInfo.result || {};
@@ -1000,6 +1058,45 @@ async function setTopicClosedByThread(threadId, closed, env) {
 
   topic.closed = closed;
   await env.PM.put(key, JSON.stringify(topic));
+}
+
+async function withUserTopicCreateLock(userId, env, work) {
+  const key = SHAW_KV.topicCreateLock(userId);
+  const lockTtlSec = 12;
+  const waitMs = 180;
+  const maxRounds = 35;
+  const owner = createNonce();
+
+  for (let i = 0; i < maxRounds; i += 1) {
+    const now = Date.now();
+    const lock = await env.PM.get(key, { type: "json" });
+
+    if (!lock || Number(lock.expiresAt || 0) <= now) {
+      const candidate = { owner, expiresAt: now + lockTtlSec * 1000 };
+      await env.PM.put(key, JSON.stringify(candidate), { expirationTtl: lockTtlSec });
+
+      // 再读确认锁归属（KV 非强一致，尽量降低并发重复创建概率）
+      const confirmed = await env.PM.get(key, { type: "json" });
+      if (confirmed?.owner === owner) {
+        try {
+          return await work();
+        } finally {
+          const again = await env.PM.get(key, { type: "json" });
+          if (again?.owner === owner) {
+            await env.PM.delete(key);
+          }
+        }
+      }
+    }
+
+    await sleep(waitMs);
+  }
+
+  // 锁竞争超时：再查一次映射，尽量不抛错
+  const fallback = await env.PM.get(SHAW_KV.topicByUser(userId), { type: "json" });
+  if (fallback?.threadId) return fallback;
+
+  throw new Error("话题创建繁忙，请稍后重试");
 }
 
 function buildTopicTitle(msg) {

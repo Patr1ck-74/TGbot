@@ -44,6 +44,9 @@
 
 ### C. 管理员侧：群主聊天区指令（不在话题里）
 
+- `/help`
+  - 显示管理员命令总览（群主聊天区 + 话题内命令）
+
 - `/cl` 或 `/cool`
   - 列出当前处于冷却中的用户（最多展示前 20）
   - 自动附带“解封 UID”按钮，可点击一键解封
@@ -58,12 +61,7 @@
   - 温和清理：仅处理“过期验证会话 + 已到期冷却状态”
   - `maxScan` 可选，默认 600，范围 50~5000
 
-- `/cleanall confirm [maxKeys]`
-  - 危险操作：按前缀批量清理全量 `shaw:` 键
-  - `maxKeys` 可选，默认 300，最大 2000（用于避免单次执行过重）
-
 > 注：管理员命令仅群管理员/群主可用。
-> 建议优先用 `/cleanstale` 或 `/clean <uid>`，`/cleanall` 仅在你明确知道影响范围时使用。
 
 ---
 
@@ -130,6 +128,7 @@ curl "https://api.telegram.org/bot<你的BOT_TOKEN>/getWebhookInfo"
 
 - 温和清理（推荐）：`/cleanstale [maxScan]`
 - 清理单个用户：`/clean <uid>`
-- 批量清理全量：`/cleanall confirm [maxKeys]`
 
-`/cleanall` 是危险操作，建议分批执行并确认无误后再继续。
+### 5) 管理员如何查看全部命令？
+
+在群主聊天区发送：`/help`
