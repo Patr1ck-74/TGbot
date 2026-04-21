@@ -157,6 +157,11 @@ async function handleCallbackQuery(query, env) {
     return;
   }
 
+  if (data.startsWith("admin_clean|")) {
+    await handleAdminCleanCallback(query, env);
+    return;
+  }
+
   if (!data.startsWith("verify|")) {
     await shawTelegramCall(env, "answerCallbackQuery", {
       callback_query_id: query.id,
@@ -733,14 +738,37 @@ async function handleAdminUnfreezeCallback(query, env) {
     text: ok ? `已解封 ${uid}` : "该用户当前无冷却",
     show_alert: false,
   });
+}
 
-  if (query.message?.message_id) {
-    await shawTelegramCall(env, "editMessageReplyMarkup", {
-      chat_id: groupId,
-      message_id: query.message.message_id,
-      reply_markup: { inline_keyboard: [] },
+async function handleAdminCleanCallback(query, env) {
+  const groupId = Number(env.SUPERGROUP_ID);
+  if (Number(query.message?.chat?.id) !== groupId) {
+    await shawTelegramCall(env, "answerCallbackQuery", {
+      callback_query_id: query.id,
+      text: "仅限群组内操作",
+      show_alert: true,
     });
+    return;
   }
+
+  const isAdmin = await isGroupAdmin(env, groupId, query.from?.id);
+  if (!isAdmin) {
+    await shawTelegramCall(env, "answerCallbackQuery", {
+      callback_query_id: query.id,
+      text: "仅管理员可操作",
+      show_alert: true,
+    });
+    return;
+  }
+
+  const uid = Number((query.data || "").split("|")[1]);
+  const stats = uid ? await cleanupUserScopedData(uid, env) : null;
+
+  await shawTelegramCall(env, "answerCallbackQuery", {
+    callback_query_id: query.id,
+    text: stats ? `已清理 ${uid}（${stats.deleted}）` : "无效 UID",
+    show_alert: false,
+  });
 }
 
 async function sendAdminHelp(env, threadId = null) {
@@ -751,7 +779,7 @@ async function sendAdminHelp(env, threadId = null) {
       "",
       "群主聊天区（非话题）",
       "/help - 查看本帮助",
-      "/cl 或 /cool - 查看冷却用户列表",
+      "/cl 或 /cool - 查看冷却用户列表（支持按钮一键解封/清理）",
       "/uf <uid> - 解封指定 UID",
       "/clean <uid> - 清理指定 UID 的状态数据",
       "/cleanstale [maxScan] - 清理过期验证会话与已到期冷却",
@@ -759,6 +787,8 @@ async function sendAdminHelp(env, threadId = null) {
       "用户话题内",
       "/help - 查看本帮助",
       "/info - 查看当前用户信息",
+      "/uf - 解封当前话题用户",
+      "/clean - 清理当前话题用户状态",
       "/close - 关闭当前对话",
       "/open - 重新开启当前对话",
     ].join("\n"),
@@ -791,7 +821,10 @@ async function sendCooldownList(msg, env) {
       "\n点击下方按钮可直接解封",
     ].join("\n"),
     reply_markup: {
-      inline_keyboard: top.map((u) => [{ text: `解封 ${u.uid}`, callback_data: `admin_unfreeze|${u.uid}` }]),
+      inline_keyboard: top.map((u) => [
+        { text: `解封 ${u.uid}`, callback_data: `admin_unfreeze|${u.uid}` },
+        { text: `清理 ${u.uid}`, callback_data: `admin_clean|${u.uid}` },
+      ]),
     },
   });
 }
@@ -984,6 +1017,26 @@ async function handleSupergroupThreadMessage(msg, env, ctx) {
     await shawTelegramCall(env, "reopenForumTopic", {
       chat_id: Number(env.SUPERGROUP_ID),
       message_thread_id: threadId,
+    });
+    return;
+  }
+
+  if (text === "/uf") {
+    const ok = await unfreezeUser(userId, env);
+    await shawTelegramCall(env, "sendMessage", {
+      chat_id: Number(env.SUPERGROUP_ID),
+      message_thread_id: threadId,
+      text: ok ? `✅ 已解封 UID ${userId}` : `⚠️ UID ${userId} 当前无冷却或不存在`,
+    });
+    return;
+  }
+
+  if (text === "/clean") {
+    const stats = await cleanupUserScopedData(userId, env);
+    await shawTelegramCall(env, "sendMessage", {
+      chat_id: Number(env.SUPERGROUP_ID),
+      message_thread_id: threadId,
+      text: `🧹 已清理 UID ${userId} 的 ${stats.deleted} 个键${stats.hasMore ? "（仍有剩余 rate-limit 键，可再执行一次）" : ""}`,
     });
     return;
   }
