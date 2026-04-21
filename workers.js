@@ -594,10 +594,9 @@ async function getOrCreateUserTopic(msg, userId, env) {
 
 async function recreateTopicAndRefwd(msg, userId, env, forwarded) {
   const errDesc = (forwarded.description || "").toLowerCase();
-  const shouldRecreate =
-    !forwarded.ok
-      ? errDesc.includes("thread") || errDesc.includes("topic") || errDesc.includes("not found")
-      : true;
+  const invalidTopicError =
+    !forwarded.ok && (errDesc.includes("thread") || errDesc.includes("topic") || errDesc.includes("not found"));
+  const shouldRecreate = invalidTopicError || (forwarded.ok && !forwarded.result?.message_thread_id);
 
   if (!shouldRecreate) return null;
 
@@ -608,11 +607,20 @@ async function recreateTopicAndRefwd(msg, userId, env, forwarded) {
     });
   }
 
-  // 话题失效后仅重建映射，不再强制用户重新验证
   const oldTopic = await getUserTopicIfExists(userId, env);
   await env.PM.delete(SHAW_KV.topicByUser(userId));
   if (oldTopic?.threadId) {
     await env.PM.delete(SHAW_KV.userByThread(oldTopic.threadId));
+  }
+
+  // 管理员手动删话题（thread/topic/not found）时：强制重新验证
+  if (invalidTopicError) {
+    await resetUserVerification(userId, env);
+    await shawTelegramCall(env, "sendMessage", {
+      chat_id: userId,
+      text: "⚠️ 原会话话题已失效（可能被管理员删除），请重新验证后继续：/start",
+    });
+    return null;
   }
 
   const newTopic = await getOrCreateUserTopic(msg, userId, env);
