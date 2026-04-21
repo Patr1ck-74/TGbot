@@ -1062,7 +1062,7 @@ async function setTopicClosedByThread(threadId, closed, env) {
 
 async function withUserTopicCreateLock(userId, env, work) {
   const key = SHAW_KV.topicCreateLock(userId);
-  const lockTtlSec = 12;
+  const lockTtlSec = 60;
   const waitMs = 180;
   const maxRounds = 35;
   const owner = createNonce();
