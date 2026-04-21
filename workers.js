@@ -594,11 +594,11 @@ async function getOrCreateUserTopic(msg, userId, env) {
 
 async function recreateTopicAndRefwd(msg, userId, env, forwarded) {
   const errDesc = (forwarded.description || "").toLowerCase();
-  const invalidTopicError =
-    !forwarded.ok && (errDesc.includes("thread") || errDesc.includes("topic") || errDesc.includes("not found"));
-  const shouldRecreate = invalidTopicError || (forwarded.ok && !forwarded.result?.message_thread_id);
+  const shouldResetAndReverify =
+    (!forwarded.ok && (errDesc.includes("thread") || errDesc.includes("topic") || errDesc.includes("not found"))) ||
+    (forwarded.ok && !forwarded.result?.message_thread_id);
 
-  if (!shouldRecreate) return null;
+  if (!shouldResetAndReverify) return null;
 
   if (forwarded.ok && forwarded.result?.message_id) {
     await shawTelegramCall(env, "deleteMessage", {
@@ -613,33 +613,13 @@ async function recreateTopicAndRefwd(msg, userId, env, forwarded) {
     await env.PM.delete(SHAW_KV.userByThread(oldTopic.threadId));
   }
 
-  // 管理员手动删话题（thread/topic/not found）时：强制重新验证
-  if (invalidTopicError) {
-    await resetUserVerification(userId, env);
-    await shawTelegramCall(env, "sendMessage", {
-      chat_id: userId,
-      text: "⚠️ 原会话话题已失效（可能被管理员删除），请重新验证后继续：/start",
-    });
-    return null;
-  }
-
-  const newTopic = await getOrCreateUserTopic(msg, userId, env);
-  const retried = await shawTelegramCall(env, "forwardMessage", {
-    chat_id: Number(env.SUPERGROUP_ID),
-    from_chat_id: userId,
-    message_id: msg.message_id,
-    message_thread_id: newTopic.threadId,
+  await resetUserVerification(userId, env);
+  await shawTelegramCall(env, "sendMessage", {
+    chat_id: userId,
+    text: "⚠️ 原会话话题已失效（可能被管理员删除），请重新验证后继续：/start",
   });
 
-  if (!retried.ok || !retried.result?.message_thread_id) {
-    await shawTelegramCall(env, "sendMessage", {
-      chat_id: userId,
-      text: "⚠️ 对话重建失败，请稍后重试。",
-    });
-    return null;
-  }
-
-  return newTopic;
+  return null;
 }
 
 async function handleSupergroupControlCommand(msg, env) {
