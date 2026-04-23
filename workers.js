@@ -24,6 +24,7 @@ const SHAW_SETTINGS = {
   },
   trust: {
     newUserWindowMs: 24 * 60 * 60 * 1000,
+    trustedBypassAdCheck: true,
   },
   rateLimit: {
     newcomer: [
@@ -244,9 +245,7 @@ async function handleCallbackQuery(query, env) {
 
   session.attempts += 1;
   if (session.attempts >= session.maxAttempts) {
-    const profile = await getUserProfile(userId, env);
-    profile.cooldownUntil = now + SHAW_SETTINGS.antiSpam.cooldownMs;
-    await setUserProfile(userId, profile, env);
+    await applyAutoCooldownIfAllowed(userId, now + SHAW_SETTINGS.antiSpam.cooldownMs, env);
     await env.PM.delete(key);
 
     await shawTelegramCall(env, "answerCallbackQuery", {
@@ -280,7 +279,8 @@ async function handlePrivateChatMessage(msg, env, ctx) {
   const now = Date.now();
 
   const profile = await getUserProfile(userId, env);
-  if (profile.cooldownUntil && now < profile.cooldownUntil) {
+  const isTrusted = profile.trusted === true;
+  if (!isTrusted && profile.cooldownUntil && now < profile.cooldownUntil) {
     await shawTelegramCall(env, "sendMessage", {
       chat_id: userId,
       text: "⏳ 当前账号处于冷却中，请稍后再试。",
@@ -317,7 +317,7 @@ async function handlePrivateChatMessage(msg, env, ctx) {
     return;
   }
 
-  const isNewUser = now - (profile.verifiedAt || now) < SHAW_SETTINGS.trust.newUserWindowMs;
+  const isNewUser = !isTrusted && now - (profile.verifiedAt || now) < SHAW_SETTINGS.trust.newUserWindowMs;
   const limiterRules = isNewUser ? SHAW_SETTINGS.rateLimit.newcomer : SHAW_SETTINGS.rateLimit.normal;
   const allowed = await consumeRateLimit(userId, limiterRules, env, now);
   if (!allowed) {
@@ -339,21 +339,23 @@ async function handlePrivateChatMessage(msg, env, ctx) {
     }
   }
 
-  const adVerdict = await evaluateAdSpam(userId, msg, isNewUser, env, now);
-  if (adVerdict.blocked) {
-    await shawTelegramCall(env, "sendMessage", {
-      chat_id: userId,
-      text: "🚫 检测到疑似广告/引流内容，账号已临时冷却。",
-    });
-    return;
-  }
+  if (!(isTrusted && SHAW_SETTINGS.trust.trustedBypassAdCheck)) {
+    const adVerdict = await evaluateAdSpam(userId, msg, isNewUser, env, now);
+    if (adVerdict.blocked) {
+      await shawTelegramCall(env, "sendMessage", {
+        chat_id: userId,
+        text: "🚫 检测到疑似广告/引流内容，账号已临时冷却。",
+      });
+      return;
+    }
 
-  if (adVerdict.warned) {
-    await shawTelegramCall(env, "sendMessage", {
-      chat_id: userId,
-      text: "⛔ 检测到疑似广告特征，本条消息已拦截且未转发。请勿发送链接、联系方式或转发推广内容。",
-    });
-    return;
+    if (adVerdict.warned) {
+      await shawTelegramCall(env, "sendMessage", {
+        chat_id: userId,
+        text: "⛔ 检测到疑似广告特征，本条消息已拦截且未转发。请勿发送链接、联系方式或转发推广内容。",
+      });
+      return;
+    }
   }
 
   await forwardPrivateMessageToTopic(msg, userId, env, ctx);
@@ -489,6 +491,9 @@ async function getUserProfile(userId, env) {
       verified: false,
       verifiedAt: 0,
       cooldownUntil: 0,
+      trusted: false,
+      trustedAt: 0,
+      trustedBy: 0,
     }
   );
 }
@@ -533,9 +538,7 @@ async function evaluateRepeatSpam(userId, text, env, now) {
   await env.PM.put(key, JSON.stringify(state), { expirationTtl: 24 * 3600 });
 
   if (state.count >= SHAW_SETTINGS.antiSpam.repeatThreshold) {
-    const profile = await getUserProfile(userId, env);
-    profile.cooldownUntil = now + SHAW_SETTINGS.antiSpam.cooldownMs;
-    await setUserProfile(userId, profile, env);
+    await applyAutoCooldownIfAllowed(userId, now + SHAW_SETTINGS.antiSpam.cooldownMs, env);
     return { blocked: true };
   }
 
@@ -563,10 +566,7 @@ async function evaluateAdSpam(userId, msg, isNewUser, env, now) {
     state.riskHits += 1;
     state.lastAt = now;
     await env.PM.put(key, JSON.stringify(state), { expirationTtl: 24 * 3600 });
-
-    const profile = await getUserProfile(userId, env);
-    profile.cooldownUntil = now + SHAW_SETTINGS.antiSpam.cooldownMs;
-    await setUserProfile(userId, profile, env);
+    await applyAutoCooldownIfAllowed(userId, now + SHAW_SETTINGS.antiSpam.cooldownMs, env);
     return { blocked: true, warned: false };
   }
 
@@ -576,9 +576,7 @@ async function evaluateAdSpam(userId, msg, isNewUser, env, now) {
     await env.PM.put(key, JSON.stringify(state), { expirationTtl: 24 * 3600 });
 
     if (state.riskHits >= riskHitLimit) {
-      const profile = await getUserProfile(userId, env);
-      profile.cooldownUntil = now + SHAW_SETTINGS.antiSpam.cooldownMs;
-      await setUserProfile(userId, profile, env);
+      await applyAutoCooldownIfAllowed(userId, now + SHAW_SETTINGS.antiSpam.cooldownMs, env);
       return { blocked: true, warned: false };
     }
 
@@ -840,6 +838,42 @@ async function handleSupergroupControlCommand(msg, env) {
     });
     return;
   }
+
+  if (text.startsWith("/trust")) {
+    const uid = Number(text.split(/\s+/)[1]);
+    if (!uid) {
+      await shawTelegramCall(env, "sendMessage", {
+        chat_id: Number(env.SUPERGROUP_ID),
+        text: "用法：/trust <uid>\n示例：/trust 123456789",
+      });
+      return;
+    }
+
+    const ok = await setUserTrust(uid, true, msg.from?.id, env);
+    await shawTelegramCall(env, "sendMessage", {
+      chat_id: Number(env.SUPERGROUP_ID),
+      text: ok ? `✅ 已信任 UID ${uid}` : `⚠️ UID ${uid} 不存在或未验证`,
+    });
+    return;
+  }
+
+  if (text.startsWith("/untrust")) {
+    const uid = Number(text.split(/\s+/)[1]);
+    if (!uid) {
+      await shawTelegramCall(env, "sendMessage", {
+        chat_id: Number(env.SUPERGROUP_ID),
+        text: "用法：/untrust <uid>\n示例：/untrust 123456789",
+      });
+      return;
+    }
+
+    const ok = await setUserTrust(uid, false, msg.from?.id, env);
+    await shawTelegramCall(env, "sendMessage", {
+      chat_id: Number(env.SUPERGROUP_ID),
+      text: ok ? `✅ 已取消信任 UID ${uid}` : `⚠️ UID ${uid} 不存在或未验证`,
+    });
+    return;
+  }
 }
 
 async function handleAdminUnfreezeCallback(query, env) {
@@ -914,6 +948,8 @@ async function sendAdminHelp(env, threadId = null) {
       "/help - 查看本帮助",
       "/cl 或 /cool - 查看冷却用户列表（支持按钮一键解封/清理）",
       "/uf <uid> - 解封指定 UID",
+      "/trust <uid> - 手动信任用户（按普通用户策略，默认跳过广告评分）",
+      "/untrust <uid> - 取消手动信任",
       "/clean <uid> - 清理指定 UID 的状态数据",
       "/cleanstale [maxScan] - 清理过期验证会话与已到期冷却",
       "",
@@ -921,6 +957,8 @@ async function sendAdminHelp(env, threadId = null) {
       "/help - 查看本帮助",
       "/info - 查看当前用户信息",
       "/uf - 解封当前话题用户",
+      "/trust - 信任当前话题用户",
+      "/untrust - 取消信任当前话题用户",
       "/clean - 清理当前话题用户状态",
       "/close - 关闭当前对话",
       "/open - 重新开启当前对话",
@@ -999,6 +1037,30 @@ async function unfreezeUser(userId, env) {
   const profile = await getUserProfile(userId, env);
   if (!profile.cooldownUntil || profile.cooldownUntil <= Date.now()) return false;
   profile.cooldownUntil = 0;
+  await setUserProfile(userId, profile, env);
+  return true;
+}
+
+async function applyAutoCooldownIfAllowed(userId, cooldownUntil, env) {
+  const profile = await getUserProfile(userId, env);
+  if (profile.trusted === true) return false;
+
+  profile.cooldownUntil = cooldownUntil;
+  await setUserProfile(userId, profile, env);
+  return true;
+}
+
+async function setUserTrust(userId, trusted, operatorId, env) {
+  const profile = await getUserProfile(userId, env);
+  if (!profile?.verified) return false;
+
+  profile.trusted = trusted;
+  profile.trustedAt = trusted ? Date.now() : 0;
+  profile.trustedBy = trusted ? Number(operatorId || 0) : 0;
+  if (trusted) {
+    // trust 用户永不自动冷却：授予信任时立即解除历史冷却
+    profile.cooldownUntil = 0;
+  }
   await setUserProfile(userId, profile, env);
   return true;
 }
@@ -1164,6 +1226,26 @@ async function handleSupergroupThreadMessage(msg, env, ctx) {
     return;
   }
 
+  if (text === "/trust") {
+    const ok = await setUserTrust(userId, true, msg.from?.id, env);
+    await shawTelegramCall(env, "sendMessage", {
+      chat_id: Number(env.SUPERGROUP_ID),
+      message_thread_id: threadId,
+      text: ok ? `✅ 已信任 UID ${userId}` : `⚠️ UID ${userId} 不存在或未验证`,
+    });
+    return;
+  }
+
+  if (text === "/untrust") {
+    const ok = await setUserTrust(userId, false, msg.from?.id, env);
+    await shawTelegramCall(env, "sendMessage", {
+      chat_id: Number(env.SUPERGROUP_ID),
+      message_thread_id: threadId,
+      text: ok ? `✅ 已取消信任 UID ${userId}` : `⚠️ UID ${userId} 不存在或未验证`,
+    });
+    return;
+  }
+
   if (text === "/clean") {
     const stats = await cleanupUserScopedData(userId, env);
     await shawTelegramCall(env, "sendMessage", {
@@ -1182,6 +1264,7 @@ async function handleSupergroupThreadMessage(msg, env, ctx) {
   if (text === "/info") {
     const chatInfo = await shawTelegramCall(env, "getChat", { chat_id: userId });
     const r = chatInfo.result || {};
+    const profile = await getUserProfile(userId, env);
     const fullName = `${r.first_name || ""} ${r.last_name || ""}`.trim() || "Unknown";
     const username = r.username ? `@${r.username}` : "无";
 
@@ -1190,6 +1273,7 @@ async function handleSupergroupThreadMessage(msg, env, ctx) {
       `UID: <code>${userId}</code>`,
       `Name: <code>${escapeHtml(fullName)}</code>`,
       `Username: <code>${escapeHtml(username)}</code>`,
+      `Trusted: <code>${profile.trusted ? "YES" : "NO"}</code>`,
     ].join("\n");
 
     await shawTelegramCall(env, "sendMessage", {

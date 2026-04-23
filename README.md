@@ -17,10 +17,9 @@
   - 普通用户：10 秒 4 条、60 秒 12 条
 - **重复骚扰检测**
   - 短时间重复文本达到阈值会触发冷却
-- **广告风控评分（新增）**
-  - 识别转发广告、链接/mention、引流关键词、via_bot 等特征
-  - 新用户与普通用户分层阈值（新用户更严格）
-  - 支持“软命中累计 + 硬命中立即冷却”
+- **广告拦截**
+  - 按多信号评分（转发、链接、关键词、实体等）自动拦截
+  - 新用户阈值更严格，支持软/硬命中
 - **会话失效保护**
   - 管理员删除话题后，用户再次发消息会被要求重新验证
 - **管理员冷却管理**（群主聊天区）
@@ -43,6 +42,8 @@
 - `/help`：查看管理员命令帮助
 - `/info`：查看当前用户信息（UID、Name、Username）
 - `/uf`：解封当前话题对应用户
+- `/trust`：信任当前话题用户（信任用户不触发自动冷却）
+- `/untrust`：取消信任当前话题用户
 - `/clean`：清理当前话题对应用户状态
 - `/close`：关闭当前对话（用户继续发消息会提示已关闭）
 - `/open`：重新开启当前对话
@@ -60,6 +61,9 @@
 
 - `/uf <uid>`
   - 手动解封指定 UID（短命令）
+
+- `/trust <uid>` / `/untrust <uid>`
+  - 手动设置用户信任状态（信任用户不触发自动冷却）
 
 - `/clean <uid>`
   - 清理某个用户在 KV 中的状态数据（话题映射、验证状态、反骚扰状态、限流计数等）
@@ -127,22 +131,11 @@ curl "https://api.telegram.org/bot<你的BOT_TOKEN>/getWebhookInfo"
 
 ### 2.1) 广告信息仍偶发漏过，怎么继续优化？
 
-可优先调整 `workers.js` 中 `SHAW_SETTINGS.antiSpam`：
+可调整 `workers.js` 的 `SHAW_SETTINGS.antiSpam`：
 
-- `hardScoreNew / hardScoreNormal`
-  - **降低**可更严格（更容易直接冷却），建议每次降 1 后观察 1~2 天。
-- `softScoreNew / softScoreNormal`
-  - **降低**可更早触发“风险累计”。
-- `riskThresholdHitsNew / riskThresholdHitsNormal`
-  - **降低**可更快把可疑用户送入冷却（例如新用户改为 1 表示软命中一次就冷却）。
-- `riskWindowMs`
-  - **增大**表示累计窗口更长，更容易抓到“分批发送广告”。
-
-实战建议：
-
-1. 若主要是“转发广告”漏过：优先下调 `hardScoreNew` 到 `3`。
-2. 若主要是“分多条发链接/联系方式”漏过：把 `softScoreNew` 调到 `1`、`riskThresholdHitsNew` 调到 `1~2`。
-3. 若误伤正常用户：先提高 `softScoreNormal` 或 `riskThresholdHitsNormal`。
+- 想更严：下调 `hardScore* / softScore* / riskThresholdHits*`
+- 想减少误伤：上调以上阈值
+- 建议每次只改一项，观察 1~2 天再继续调
 
 ### 3) 可否手动取消冷却？
 
