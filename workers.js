@@ -38,6 +38,13 @@ const SHAW_SETTINGS = {
   antiSpam: {
     repeatWindowMs: 90 * 1000,
     repeatThreshold: 3,
+    riskWindowMs: 10 * 60 * 1000,
+    riskThresholdHitsNew: 2,
+    riskThresholdHitsNormal: 3,
+    hardScoreNew: 4,
+    hardScoreNormal: 5,
+    softScoreNew: 2,
+    softScoreNormal: 3,
     cooldownMs: 30 * 60 * 1000,
   },
   mediaGroupFlushDelayMs: 2000,
@@ -332,6 +339,23 @@ async function handlePrivateChatMessage(msg, env, ctx) {
     }
   }
 
+  const adVerdict = await evaluateAdSpam(userId, msg, isNewUser, env, now);
+  if (adVerdict.blocked) {
+    await shawTelegramCall(env, "sendMessage", {
+      chat_id: userId,
+      text: "🚫 检测到疑似广告/引流内容，账号已临时冷却。",
+    });
+    return;
+  }
+
+  if (adVerdict.warned) {
+    await shawTelegramCall(env, "sendMessage", {
+      chat_id: userId,
+      text: "⛔ 检测到疑似广告特征，本条消息已拦截且未转发。请勿发送链接、联系方式或转发推广内容。",
+    });
+    return;
+  }
+
   await forwardPrivateMessageToTopic(msg, userId, env, ctx);
 }
 
@@ -493,9 +517,7 @@ async function consumeRateLimit(userId, rules, env, nowMs) {
 
 async function evaluateRepeatSpam(userId, text, env, now) {
   const key = SHAW_KV.spamState(userId);
-  const state =
-    (await env.PM.get(key, { type: "json" })) ||
-    { hash: "", count: 0, lastAt: 0 };
+  const state = ensureSpamStateShape(await env.PM.get(key, { type: "json" }));
 
   const normalized = normalizeText(text);
   const hash = simpleHash(normalized);
@@ -518,6 +540,109 @@ async function evaluateRepeatSpam(userId, text, env, now) {
   }
 
   return { blocked: false };
+}
+
+async function evaluateAdSpam(userId, msg, isNewUser, env, now) {
+  const key = SHAW_KV.spamState(userId);
+  const state = ensureSpamStateShape(await env.PM.get(key, { type: "json" }));
+
+  const { score } = scoreSpamSignals(msg);
+  const hardScore = isNewUser ? SHAW_SETTINGS.antiSpam.hardScoreNew : SHAW_SETTINGS.antiSpam.hardScoreNormal;
+  const softScore = isNewUser ? SHAW_SETTINGS.antiSpam.softScoreNew : SHAW_SETTINGS.antiSpam.softScoreNormal;
+  const riskHitLimit = isNewUser
+    ? SHAW_SETTINGS.antiSpam.riskThresholdHitsNew
+    : SHAW_SETTINGS.antiSpam.riskThresholdHitsNormal;
+
+  const inWindow = now - Number(state.riskWindowStart || 0) <= SHAW_SETTINGS.antiSpam.riskWindowMs;
+  if (!inWindow) {
+    state.riskWindowStart = now;
+    state.riskHits = 0;
+  }
+
+  if (score >= hardScore) {
+    state.riskHits += 1;
+    state.lastAt = now;
+    await env.PM.put(key, JSON.stringify(state), { expirationTtl: 24 * 3600 });
+
+    const profile = await getUserProfile(userId, env);
+    profile.cooldownUntil = now + SHAW_SETTINGS.antiSpam.cooldownMs;
+    await setUserProfile(userId, profile, env);
+    return { blocked: true, warned: false };
+  }
+
+  if (score >= softScore) {
+    state.riskHits += 1;
+    state.lastAt = now;
+    await env.PM.put(key, JSON.stringify(state), { expirationTtl: 24 * 3600 });
+
+    if (state.riskHits >= riskHitLimit) {
+      const profile = await getUserProfile(userId, env);
+      profile.cooldownUntil = now + SHAW_SETTINGS.antiSpam.cooldownMs;
+      await setUserProfile(userId, profile, env);
+      return { blocked: true, warned: false };
+    }
+
+    return { blocked: false, warned: true };
+  }
+
+  // 正常消息轻度衰减风险计数，降低误伤
+  if (state.riskHits > 0) {
+    state.riskHits = Math.max(0, state.riskHits - 1);
+    state.lastAt = now;
+    await env.PM.put(key, JSON.stringify(state), { expirationTtl: 24 * 3600 });
+  }
+
+  return { blocked: false, warned: false };
+}
+
+function ensureSpamStateShape(raw) {
+  return {
+    hash: raw?.hash || "",
+    count: Number(raw?.count || 0),
+    lastAt: Number(raw?.lastAt || 0),
+    riskHits: Number(raw?.riskHits || 0),
+    riskWindowStart: Number(raw?.riskWindowStart || 0),
+  };
+}
+
+function scoreSpamSignals(msg) {
+  let score = 0;
+  const text = (msg.text || msg.caption || "").trim();
+  const normalized = normalizeText(text);
+
+  // 转发消息是目前最常见的广告绕过路径，直接高权重
+  if (isForwardedMessage(msg)) score += 4;
+  if (msg.via_bot) score += 2;
+
+  const entities = [...(msg.entities || []), ...(msg.caption_entities || [])];
+  const riskyEntityTypes = new Set(["url", "text_link", "mention", "phone_number"]);
+  const riskyEntities = entities.filter((e) => riskyEntityTypes.has(e.type));
+  score += Math.min(3, riskyEntities.length);
+
+  if (/(https?:\/\/|t\.me\/|telegram\.me\/|tg:\/\/|telegra\.ph\/)/i.test(text)) score += 3;
+  if (/@[a-zA-Z0-9_]{5,}/.test(text)) score += 2;
+
+  if (
+    /(群发|引流|广告|推广|全网覆盖|自动群发|免费试用|兼职|返利|代发|频道|电报号|飞机号|加群|拉群|私聊我|联系我)/i.test(
+      normalized
+    )
+  ) {
+    score += 2;
+  }
+
+  if (text.split(/\n+/).length >= 4) score += 1;
+
+  return { score };
+}
+
+function isForwardedMessage(msg) {
+  return Boolean(
+    msg.forward_origin ||
+      msg.forward_from ||
+      msg.forward_from_chat ||
+      msg.forward_sender_name ||
+      msg.forward_date
+  );
 }
 
 async function forwardPrivateMessageToTopic(msg, userId, env, ctx) {
