@@ -609,6 +609,7 @@ function scoreSpamSignals(msg) {
   let score = 0;
   const text = (msg.text || msg.caption || "").trim();
   const normalized = normalizeText(text);
+  const compact = compactForKeywordMatch(normalized);
 
   // 转发消息是目前最常见的广告绕过路径，直接高权重
   if (isForwardedMessage(msg)) score += 4;
@@ -626,6 +627,10 @@ function scoreSpamSignals(msg) {
     /(群发|引流|广告|推广|全网覆盖|自动群发|免费试用|兼职|返利|代发|频道|电报号|飞机号|加群|拉群|私聊我|联系我|home\s*office|job|日入|详情咨询|咨询)/i.test(
       normalized
     )
+    ||
+    /(群发|引流|广告|推广|全网覆盖|自动群发|免费试用|兼职|返利|代发|频道|电报号|飞机号|加群|拉群|私聊我|联系我|homeoffice|job|日入|详情咨询|咨询|微信|weixin|vx|v信)/i.test(
+      compact
+    )
   ) {
     score += 2;
   }
@@ -635,9 +640,15 @@ function scoreSpamSignals(msg) {
     /(合作伙伴|找\s*\d+\s*[-~到]?\s*\d*\s*个|感兴趣|详聊|细节可?私聊|长期稳定|私聊)/i.test(
       normalized
     )
+    ||
+    /(合作伙伴|找\d+[-~到]?\d*个|感兴趣|详聊|细节可?私聊|长期稳定|私聊)/i.test(compact)
   ) {
     score += 2;
   }
+
+  const density = computeNoiseDensity(normalized);
+  if (density.emojiRatio >= 0.3) score += 2;
+  if (density.symbolRatio >= 0.35 && density.symbolCount >= 6) score += 2;
 
   if (text.split(/\n+/).length >= 4) score += 1;
 
@@ -1366,9 +1377,48 @@ function normalizeText(text) {
   return String(text || "")
     .normalize("NFKC")
     .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/聯繫|聯系方式|聯絡|諮詢|詳情|兼職|賺錢|飛機號|電報號|頻道|長期穩定|體驗/g, (m) =>
+      ({
+        聯繫: "联系",
+        聯絡: "联络",
+        諮詢: "咨询",
+        詳情: "详情",
+        兼職: "兼职",
+        賺錢: "赚钱",
+        飛機號: "飞机号",
+        電報號: "电报号",
+        頻道: "频道",
+        長期穩定: "长期稳定",
+        體驗: "体验",
+        聯系方式: "联系方式",
+      }[m] || m)
+    )
     .toLowerCase()
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function compactForKeywordMatch(normalizedText) {
+  return String(normalizedText || "").replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+
+function computeNoiseDensity(text) {
+  const chars = [...String(text || "").replace(/\s+/g, "")];
+  const total = Math.max(1, chars.length);
+
+  let emojiCount = 0;
+  let symbolCount = 0;
+
+  for (const ch of chars) {
+    if (/\p{Extended_Pictographic}/u.test(ch)) emojiCount += 1;
+    if (/^[\p{S}\p{P}]$/u.test(ch)) symbolCount += 1;
+  }
+
+  return {
+    emojiRatio: emojiCount / total,
+    symbolRatio: symbolCount / total,
+    symbolCount,
+  };
 }
 
 function simpleHash(text) {
