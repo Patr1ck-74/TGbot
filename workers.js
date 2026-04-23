@@ -39,11 +39,11 @@ const SHAW_SETTINGS = {
     repeatWindowMs: 90 * 1000,
     repeatThreshold: 3,
     riskWindowMs: 10 * 60 * 1000,
-    riskThresholdHitsNew: 2,
+    riskThresholdHitsNew: 1,
     riskThresholdHitsNormal: 3,
     hardScoreNew: 4,
     hardScoreNormal: 5,
-    softScoreNew: 2,
+    softScoreNew: 1,
     softScoreNormal: 3,
     cooldownMs: 30 * 60 * 1000,
   },
@@ -624,6 +624,15 @@ function scoreSpamSignals(msg) {
 
   if (
     /(群发|引流|广告|推广|全网覆盖|自动群发|免费试用|兼职|返利|代发|频道|电报号|飞机号|加群|拉群|私聊我|联系我)/i.test(
+      normalized
+    )
+  ) {
+    score += 2;
+  }
+
+  // 软性引流文案（无链接也常见）：例如“找合作伙伴/感兴趣回我/细节私聊”
+  if (
+    /(合作伙伴|找\s*\d+\s*[-~到]?\s*\d*\s*个|感兴趣|详聊|细节可?私聊|长期稳定|私聊)/i.test(
       normalized
     )
   ) {
