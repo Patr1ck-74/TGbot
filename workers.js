@@ -619,11 +619,11 @@ function scoreSpamSignals(msg) {
   const riskyEntities = entities.filter((e) => riskyEntityTypes.has(e.type));
   score += Math.min(3, riskyEntities.length);
 
-  if (/(https?:\/\/|t\.me\/|telegram\.me\/|tg:\/\/|telegra\.ph\/)/i.test(text)) score += 3;
-  if (/@[a-zA-Z0-9_]{5,}/.test(text)) score += 2;
+  if (/(https?:\/\/|t\.me\/|telegram\.me\/|tg:\/\/|telegra\.ph\/)/i.test(normalized)) score += 3;
+  if (/@[\p{L}\p{N}_]{5,}/u.test(normalized)) score += 2;
 
   if (
-    /(群发|引流|广告|推广|全网覆盖|自动群发|免费试用|兼职|返利|代发|频道|电报号|飞机号|加群|拉群|私聊我|联系我)/i.test(
+    /(群发|引流|广告|推广|全网覆盖|自动群发|免费试用|兼职|返利|代发|频道|电报号|飞机号|加群|拉群|私聊我|联系我|home\s*office|job|日入|详情咨询|咨询)/i.test(
       normalized
     )
   ) {
@@ -1363,7 +1363,12 @@ async function shawTelegramCall(env, method, body) {
 }
 
 function normalizeText(text) {
-  return text.toLowerCase().replace(/\s+/g, " ").trim();
+  return String(text || "")
+    .normalize("NFKC")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function simpleHash(text) {
